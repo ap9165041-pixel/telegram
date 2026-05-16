@@ -3,3 +3,4 @@ requests==2.31.0
 yt-dlp==2024.12.13
 Pillow==10.4.0
 anthropic
+replicate
