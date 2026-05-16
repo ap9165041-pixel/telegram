@@ -1,441 +1,279 @@
-import os
-import re
-import logging
-import requests
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+import os, re, io, logging, requests
+from PIL import Image
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.constants import ParseMode
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8345172518:AAHahPKnJZwKZ-SIp97vBtNyMyyRXZ-Gw7M`")
-RAPID_API_KEY = os.environ.get("RAPID_API_KEY", "YOUR_RAPIDAPI_KEY_HERE")
+BOT_TOKEN         = os.environ.get("8345172518:AAHahPKnJZwKZ-SIp97vBtNyMyyRXZ-Gw7M", "")
+REMOVE_BG_API_KEY = os.environ.get("ssgbLxpM5sZT3eAxsJFLzJZ4", "")
 
-# ─────────────────────────────────────────
-#  MAIN KEYBOARD
-# ─────────────────────────────────────────
-def get_main_keyboard():
-    keyboard = [
+YT_REGEX = re.compile(r'(https?://)?(www\.)?(youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/)[\w\-]+')
+IG_REGEX = re.compile(r'(https?://)?(www\.)?instagram\.com/')
+TT_REGEX = re.compile(r'(https?://)?(www\.|vm\.)?tiktok\.com/')
+
+def main_kb():
+    return ReplyKeyboardMarkup([
         [KeyboardButton("🎬 YouTube Details"), KeyboardButton("⬇️ YT Downloader")],
         [KeyboardButton("📸 Instagram Downloader"), KeyboardButton("🎵 TikTok Downloader")],
         [KeyboardButton("🖼️ Remove Background"), KeyboardButton("ℹ️ Help")],
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+    ], resize_keyboard=True)
 
-# ─────────────────────────────────────────
-#  HELPERS
-# ─────────────────────────────────────────
-def is_youtube_url(text):
-    pattern = r'(https?://)?(www\.)?(youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/)[\w\-]+'
-    return re.search(pattern, text)
+def mono(t): return f"`{t}`"
 
-def is_instagram_url(text):
-    return re.search(r'(https?://)?(www\.)?instagram\.com/', text)
+def extract_yt_id(url):
+    m = re.search(r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/)([\w\-]+)', url)
+    return m.group(1) if m else None
 
-def is_tiktok_url(text):
-    return re.search(r'(https?://)?(www\.|vm\.)?tiktok\.com/', text)
+def bytes_to_img(b): return Image.open(io.BytesIO(b))
+def img_to_bytes(img, fmt="PNG"):
+    buf = io.BytesIO(); img.save(buf, format=fmt); return buf.getvalue()
 
-def extract_youtube_id(url):
-    patterns = [
-        r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/)([\w\-]+)',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    return None
-
-def mono(text):
-    """Wrap text in monospace for easy copy"""
-    return f"`{text}`"
-
-# ─────────────────────────────────────────
-#  YOUTUBE DETAILS
-# ─────────────────────────────────────────
-async def fetch_youtube_details(video_id: str):
-    url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
+def download_video(url, out_dir):
     try:
-        r = requests.get(url, timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            return {
-                "title": data.get("title", "N/A"),
-                "author": data.get("author_name", "N/A"),
-                "thumbnail": data.get("thumbnail_url", f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg"),
-            }
+        import yt_dlp
+        ydl_opts = {
+            'outtmpl': f'{out_dir}/%(title).60s.%(ext)s',
+            'format': 'bestvideo[ext=mp4][filesize<45M]+bestaudio[ext=m4a]/best[ext=mp4][filesize<45M]/best',
+            'merge_output_format': 'mp4',
+            'quiet': True,
+            'no_warnings': True,
+            'noplaylist': True,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            fpath = ydl.prepare_filename(info)
+            if not fpath.endswith('.mp4'):
+                fpath = fpath.rsplit('.', 1)[0] + '.mp4'
+            return fpath if os.path.exists(fpath) else None
     except Exception as e:
-        logger.error(f"YT details error: {e}")
-    return None
+        logger.error(f"yt-dlp error: {e}")
+        return None
 
-async def handle_youtube_details(update: Update, url: str):
-    msg = await update.message.reply_text("⏳ Fetching YouTube details...")
-    video_id = extract_youtube_id(url)
-    if not video_id:
-        await msg.edit_text("❌ Invalid YouTube URL.")
-        return
+user_mode = {}
 
-    data = await fetch_youtube_details(video_id)
-    thumbnail_url = f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg"
-
-    if data:
+# ─── YouTube Details ───────────────────────────────────────────────────────────
+async def handle_yt_details(update: Update, url: str):
+    vid = extract_yt_id(url)
+    if not vid:
+        await update.message.reply_text("❌ Valid YouTube link nahi mili."); return
+    msg = await update.message.reply_text("⏳ Fetching details…")
+    try:
+        r = requests.get(f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={vid}&format=json", timeout=10)
+        d = r.json() if r.status_code == 200 else {}
+        title   = d.get("title", "N/A")
+        channel = d.get("author_name", "N/A")
+        thumb   = d.get("thumbnail_url", f"https://img.youtube.com/vi/{vid}/maxresdefault.jpg")
+        video_url = f"https://www.youtube.com/watch?v={vid}"
         caption = (
             f"🎬 *YouTube Video Details*\n\n"
-            f"📌 *Title:*\n{mono(data['title'])}\n\n"
-            f"👤 *Channel:*\n{mono(data['author'])}\n\n"
-            f"🔗 *Video ID:*\n{mono(video_id)}\n\n"
-            f"🖼️ *Thumbnail URL:*\n{mono(thumbnail_url)}\n\n"
-            f"🔗 *Video URL:*\n{mono(url)}"
+            f"📌 *Title:*\n{mono(title)}\n\n"
+            f"👤 *Channel:*\n{mono(channel)}\n\n"
+            f"🆔 *Video ID:*\n{mono(vid)}\n\n"
+            f"🖼️ *Thumbnail URL:*\n{mono(thumb)}\n\n"
+            f"🔗 *Video URL:*\n{mono(video_url)}"
         )
         try:
-            await update.message.reply_photo(
-                photo=thumbnail_url,
-                caption=caption,
-                parse_mode=ParseMode.MARKDOWN
-            )
+            await update.message.reply_photo(photo=thumb, caption=caption, parse_mode=ParseMode.MARKDOWN)
         except Exception:
             await update.message.reply_text(caption, parse_mode=ParseMode.MARKDOWN)
         await msg.delete()
-    else:
-        await msg.edit_text("❌ Could not fetch details. Check the URL.")
-
-# ─────────────────────────────────────────
-#  YOUTUBE DOWNLOADER  (via RapidAPI)
-# ─────────────────────────────────────────
-async def handle_youtube_download(update: Update, url: str):
-    msg = await update.message.reply_text("⏳ Fetching download links...")
-    video_id = extract_youtube_id(url)
-    if not video_id:
-        await msg.edit_text("❌ Invalid YouTube URL.")
-        return
-
-    # Using y2mate / yt-download API on RapidAPI
-    api_url = "https://youtube-mp36.p.rapidapi.com/dl"
-    headers = {
-        "X-RapidAPI-Key": RAPID_API_KEY,
-        "X-RapidAPI-Host": "youtube-mp36.p.rapidapi.com"
-    }
-    try:
-        r = requests.get(api_url, headers=headers, params={"id": video_id}, timeout=15)
-        data = r.json()
-        if data.get("status") == "ok":
-            link = data.get("link", "N/A")
-            title = data.get("title", "N/A")
-            text = (
-                f"🎵 *YouTube MP3 Download*\n\n"
-                f"📌 *Title:*\n{mono(title)}\n\n"
-                f"⬇️ *Download Link:*\n{mono(link)}"
-            )
-            await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-            await msg.delete()
-            return
     except Exception as e:
-        logger.error(f"YT download error: {e}")
+        logger.error(e); await msg.edit_text(f"❌ Error: `{e}`", parse_mode=ParseMode.MARKDOWN)
 
-    # Fallback: provide direct links
-    text = (
-        f"⬇️ *YouTube Download Links*\n\n"
-        f"🔗 *Video ID:* {mono(video_id)}\n\n"
-        f"Use these sites to download:\n"
-        f"• {mono('https://ssyoutube.com/watch?v=' + video_id)}\n"
-        f"• {mono('https://y2mate.com')}\n"
-        f"• {mono('https://savefrom.net')}"
-    )
-    await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN)
-
-# ─────────────────────────────────────────
-#  INSTAGRAM DOWNLOADER
-# ─────────────────────────────────────────
-async def handle_instagram_download(update: Update, url: str):
-    msg = await update.message.reply_text("⏳ Fetching Instagram media...")
-
-    api_url = "https://instagram-downloader-download-instagram-videos-stories.p.rapidapi.com/index"
-    headers = {
-        "X-RapidAPI-Key": RAPID_API_KEY,
-        "X-RapidAPI-Host": "instagram-downloader-download-instagram-videos-stories.p.rapidapi.com"
-    }
+# ─── YouTube Download ──────────────────────────────────────────────────────────
+async def handle_yt_download(update: Update, url: str):
+    vid = extract_yt_id(url)
+    if not vid:
+        await update.message.reply_text("❌ Valid YouTube link nahi mili."); return
+    msg = await update.message.reply_text("⬇️ YouTube video download ho raha hai… thoda wait karo ⏳")
+    tmp = "/tmp/ytdl"; os.makedirs(tmp, exist_ok=True)
     try:
-        r = requests.get(api_url, headers=headers, params={"url": url}, timeout=15)
-        data = r.json()
-        media_url = data.get("media", data.get("url", None))
-        if media_url:
-            text = (
-                f"📸 *Instagram Download*\n\n"
-                f"⬇️ *Media URL:*\n{mono(media_url)}\n\n"
-                f"_Click the link to download_"
-            )
-            await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-            await msg.delete()
-            return
+        canonical = f"https://www.youtube.com/watch?v={vid}"
+        fpath = download_video(canonical, tmp)
+        if not fpath:
+            await msg.edit_text("❌ Video download nahi hua. Shayad age-restricted ho."); return
+        size_mb = os.path.getsize(fpath) / 1_048_576
+        if size_mb > 49:
+            os.remove(fpath); await msg.edit_text(f"⚠️ Video bahut bada hai ({size_mb:.1f} MB). Chhota video try karo."); return
+        await msg.edit_text(f"📤 Upload ho raha hai ({size_mb:.1f} MB)…")
+        with open(fpath, "rb") as f:
+            await update.message.reply_video(video=f, caption=f"✅ *YouTube Video*\n🔗 {mono(canonical)}", parse_mode=ParseMode.MARKDOWN, supports_streaming=True)
+        os.remove(fpath); await msg.delete()
     except Exception as e:
-        logger.error(f"Instagram error: {e}")
+        logger.error(e); await msg.edit_text(f"❌ Error: `{e}`", parse_mode=ParseMode.MARKDOWN)
 
-    text = (
-        f"📸 *Instagram Downloader*\n\n"
-        f"Use this site:\n"
-        f"• {mono('https://snapinsta.app')}\n"
-        f"• {mono('https://instasave.io')}\n\n"
-        f"🔗 *Your URL:*\n{mono(url)}"
-    )
-    await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN)
-
-# ─────────────────────────────────────────
-#  TIKTOK DOWNLOADER
-# ─────────────────────────────────────────
-async def handle_tiktok_download(update: Update, url: str):
-    msg = await update.message.reply_text("⏳ Fetching TikTok video...")
-
-    api_url = "https://tiktok-downloader-download-tiktok-videos-without-watermark.p.rapidapi.com/index"
-    headers = {
-        "X-RapidAPI-Key": RAPID_API_KEY,
-        "X-RapidAPI-Host": "tiktok-downloader-download-tiktok-videos-without-watermark.p.rapidapi.com"
-    }
+# ─── Instagram Download ────────────────────────────────────────────────────────
+async def handle_ig_download(update: Update, url: str):
+    if not IG_REGEX.search(url):
+        await update.message.reply_text("❌ Valid Instagram link nahi mili."); return
+    msg = await update.message.reply_text("📸 Instagram video download ho raha hai… ⏳")
+    tmp = "/tmp/igdl"; os.makedirs(tmp, exist_ok=True)
     try:
-        r = requests.get(api_url, headers=headers, params={"url": url}, timeout=15)
-        data = r.json()
-        video_url = None
-        if isinstance(data, dict):
-            video_url = data.get("video", data.get("url", None))
-        if video_url:
-            text = (
-                f"🎵 *TikTok Download (No Watermark)*\n\n"
-                f"⬇️ *Video URL:*\n{mono(video_url)}"
-            )
-            await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-            await msg.delete()
-            return
+        fpath = download_video(url, tmp)
+        if not fpath:
+            await msg.edit_text("❌ Download nahi hua. Private account ho sakta hai."); return
+        size_mb = os.path.getsize(fpath) / 1_048_576
+        if size_mb > 49:
+            os.remove(fpath); await msg.edit_text(f"⚠️ File bahut badi ({size_mb:.1f} MB)."); return
+        await msg.edit_text(f"📤 Upload ho raha hai ({size_mb:.1f} MB)…")
+        with open(fpath, "rb") as f:
+            await update.message.reply_video(video=f, caption="✅ *Instagram Video*", parse_mode=ParseMode.MARKDOWN, supports_streaming=True)
+        os.remove(fpath); await msg.delete()
     except Exception as e:
-        logger.error(f"TikTok error: {e}")
+        logger.error(e); await msg.edit_text(f"❌ Error: `{e}`", parse_mode=ParseMode.MARKDOWN)
 
-    text = (
-        f"🎵 *TikTok Downloader*\n\n"
-        f"Use these sites:\n"
-        f"• {mono('https://snaptik.app')}\n"
-        f"• {mono('https://ssstik.io')}\n\n"
-        f"🔗 *Your URL:*\n{mono(url)}"
-    )
-    await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN)
+# ─── TikTok Download ───────────────────────────────────────────────────────────
+async def handle_tt_download(update: Update, url: str):
+    if not TT_REGEX.search(url):
+        await update.message.reply_text("❌ Valid TikTok link nahi mili."); return
+    msg = await update.message.reply_text("🎵 TikTok video download ho raha hai… ⏳")
+    tmp = "/tmp/ttdl"; os.makedirs(tmp, exist_ok=True)
+    try:
+        fpath = download_video(url, tmp)
+        if not fpath:
+            await msg.edit_text("❌ Download nahi hua."); return
+        size_mb = os.path.getsize(fpath) / 1_048_576
+        if size_mb > 49:
+            os.remove(fpath); await msg.edit_text(f"⚠️ File bahut badi ({size_mb:.1f} MB)."); return
+        await msg.edit_text(f"📤 Upload ho raha hai ({size_mb:.1f} MB)…")
+        with open(fpath, "rb") as f:
+            await update.message.reply_video(video=f, caption="✅ *TikTok Video* (No Watermark)", parse_mode=ParseMode.MARKDOWN, supports_streaming=True)
+        os.remove(fpath); await msg.delete()
+    except Exception as e:
+        logger.error(e); await msg.edit_text(f"❌ Error: `{e}`", parse_mode=ParseMode.MARKDOWN)
 
-# ─────────────────────────────────────────
-#  REMOVE BACKGROUND
-# ─────────────────────────────────────────
-async def handle_remove_bg(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.photo:
-        msg = await update.message.reply_text("⏳ Removing background...")
-        photo = update.message.photo[-1]
-        file = await context.bot.get_file(photo.file_id)
-        file_bytes = await file.download_as_bytearray()
-
-        remove_bg_key = os.environ.get("REMOVE_BG_API_KEY", "")
-        if not remove_bg_key:
-            await msg.edit_text(
-                "🖼️ *Remove Background*\n\n"
-                "Set `REMOVE_BG_API_KEY` env var to enable.\n"
-                "Get free key at:\n"
-                f"{mono('https://www.remove.bg/api')}",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return
-
-        try:
-            r = requests.post(
-                "https://api.remove.bg/v1.0/removebg",
-                files={"image_file": ("image.jpg", bytes(file_bytes), "image/jpeg")},
-                data={"size": "auto"},
-                headers={"X-Api-Key": remove_bg_key},
-                timeout=30
-            )
-            if r.status_code == 200:
-                await update.message.reply_document(
-                    document=r.content,
-                    filename="removed_bg.png",
-                    caption="✅ Background removed!"
-                )
-                await msg.delete()
-            else:
-                await msg.edit_text(f"❌ Error: {r.status_code} - {r.text[:200]}")
-        except Exception as e:
-            await msg.edit_text(f"❌ Error: {str(e)[:200]}")
-    else:
-        await update.message.reply_text(
-            "🖼️ *Remove Background*\n\nPlease send a photo/image to remove its background.",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=get_main_keyboard()
+# ─── Remove Background ─────────────────────────────────────────────────────────
+async def handle_bg_remove(update: Update, photo_bytes: bytes):
+    msg = await update.message.reply_text("✂️ remove.bg se background remove ho raha hai… ⏳")
+    if not REMOVE_BG_API_KEY:
+        await msg.edit_text(
+            "❌ *REMOVE_BG_API_KEY set nahi hai!*\n\n"
+            f"Railway Variables mein add karo:\n{mono('REMOVE_BG_API_KEY = your_key')}\n\n"
+            f"Free key: {mono('https://www.remove.bg/dashboard#api-key')}",
+            parse_mode=ParseMode.MARKDOWN); return
+    try:
+        response = requests.post(
+            "https://api.remove.bg/v1.0/removebg",
+            files={"image_file": ("image.png", photo_bytes, "image/png")},
+            data={"size": "auto"},
+            headers={"X-Api-Key": REMOVE_BG_API_KEY},
+            timeout=60,
         )
+        if response.status_code != 200:
+            err = response.json().get("errors", [{}])[0].get("title", response.text[:100])
+            await msg.edit_text(f"❌ remove.bg error: `{err}`", parse_mode=ParseMode.MARKDOWN); return
 
-# ─────────────────────────────────────────
-#  COMMAND HANDLERS
-# ─────────────────────────────────────────
+        img_rgba = bytes_to_img(response.content).convert("RGBA")
+        credits  = response.headers.get("X-Credits-Remaining", "?")
+
+        buf_t = io.BytesIO(img_to_bytes(img_rgba, "PNG")); buf_t.name = "transparent.png"
+
+        white = Image.new("RGBA", img_rgba.size, (255, 255, 255, 255))
+        white.paste(img_rgba, mask=img_rgba.split()[3])
+        buf_w = io.BytesIO(img_to_bytes(white.convert("RGB"), "PNG")); buf_w.name = "white_bg.png"
+
+        black = Image.new("RGBA", img_rgba.size, (0, 0, 0, 255))
+        black.paste(img_rgba, mask=img_rgba.split()[3])
+        buf_b = io.BytesIO(img_to_bytes(black.convert("RGB"), "PNG")); buf_b.name = "black_bg.png"
+
+        await msg.delete()
+        await update.message.reply_photo(photo=buf_t, caption=f"✅ *Background Removed!*\n🖼 Transparent PNG\n💳 Credits left: {mono(str(credits))}", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_photo(photo=buf_w, caption="🤍 White background version")
+        await update.message.reply_photo(photo=buf_b, caption="🖤 Black background version (thumbnail ke liye best!)")
+    except Exception as e:
+        logger.error(e); await msg.edit_text(f"❌ BG remove fail: `{e}`", parse_mode=ParseMode.MARKDOWN)
+
+# ─── Commands ──────────────────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    text = (
-        f"👋 *Welcome {user.first_name}!*\n\n"
-        f"🤖 I am your *All-in-One Media Bot*\n\n"
-        f"*What I can do:*\n"
-        f"🎬 Extract YouTube video details\n"
-        f"⬇️ Download YouTube videos/audio\n"
-        f"📸 Download Instagram videos/reels\n"
-        f"🎵 Download TikTok without watermark\n"
-        f"🖼️ Remove image background\n\n"
-        f"*Just paste a link or use buttons below!*"
+    await update.message.reply_text(
+        f"👋 *Welcome {user.first_name}!*\n\n🤖 *All-in-One Media Bot*\n\n"
+        f"🎬 YouTube details\n⬇️ YouTube download (direct file!)\n📸 Instagram download\n🎵 TikTok (no watermark)\n🖼️ BG remove (3 versions!)\n\n"
+        f"Link paste karo ya buttons use karo 👇",
+        parse_mode=ParseMode.MARKDOWN, reply_markup=main_kb()
     )
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_main_keyboard())
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        f"📖 *How to use this bot:*\n\n"
-        f"1️⃣ *YouTube Details* → Paste YT link → get title, thumbnail, description\n"
-        f"2️⃣ *YT Downloader* → Paste YT link → get download link\n"
-        f"3️⃣ *Instagram* → Paste IG reel/post link\n"
-        f"4️⃣ *TikTok* → Paste TikTok link\n"
-        f"5️⃣ *Remove BG* → Send any photo\n\n"
-        f"💡 *Tip:* All details shown in monospace — tap to copy!\n\n"
-        f"🔧 *Commands:*\n"
-        f"/start - Restart bot\n"
-        f"/help - This message\n"
-        f"/ytdetails <url> - YouTube details\n"
-        f"/ytdownload <url> - YT download\n"
-        f"/igdownload <url> - Instagram\n"
-        f"/ttdownload <url> - TikTok\n"
-        f"/removebg - Remove background (send photo)"
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📖 *Help*\n\n1️⃣ Button → link paste karo\n2️⃣ Ya seedha link paste karo (auto-detect)\n3️⃣ BG remove → button → photo bhejo\n\n💡 *Monospace text = tap to copy!*\n\n"
+        "/start /help /ytdetails /ytdownload /igdownload /ttdownload /removebg",
+        parse_mode=ParseMode.MARKDOWN, reply_markup=main_kb()
     )
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_main_keyboard())
 
-# ─────────────────────────────────────────
-#  STATE TRACKING for button modes
-# ─────────────────────────────────────────
-user_mode = {}  # user_id -> mode
+async def cmd_ytdetails(u, c):
+    if c.args: await handle_yt_details(u, " ".join(c.args))
+    else: user_mode[u.effective_user.id]="yt_details"; await u.message.reply_text("🎬 YouTube link paste karo:")
 
-async def handle_keyboard_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    user_id = update.effective_user.id
+async def cmd_ytdownload(u, c):
+    if c.args: await handle_yt_download(u, " ".join(c.args))
+    else: user_mode[u.effective_user.id]="yt_download"; await u.message.reply_text("⬇️ YouTube link paste karo:")
 
-    if text == "🎬 YouTube Details":
-        user_mode[user_id] = "yt_details"
-        await update.message.reply_text(
-            "🎬 *YouTube Details Extractor*\n\nPaste a YouTube link:",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    elif text == "⬇️ YT Downloader":
-        user_mode[user_id] = "yt_download"
-        await update.message.reply_text(
-            "⬇️ *YouTube Downloader*\n\nPaste a YouTube link:",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    elif text == "📸 Instagram Downloader":
-        user_mode[user_id] = "ig_download"
-        await update.message.reply_text(
-            "📸 *Instagram Downloader*\n\nPaste an Instagram post/reel/story link:",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    elif text == "🎵 TikTok Downloader":
-        user_mode[user_id] = "tt_download"
-        await update.message.reply_text(
-            "🎵 *TikTok Downloader*\n\nPaste a TikTok video link:",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    elif text == "🖼️ Remove Background":
-        user_mode[user_id] = "remove_bg"
-        await update.message.reply_text(
-            "🖼️ *Remove Background*\n\nSend a photo/image:",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    elif text == "ℹ️ Help":
-        await help_command(update, context)
-    else:
-        # Handle URLs sent in any mode or auto-detect
-        await handle_url_message(update, context)
+async def cmd_igdownload(u, c):
+    if c.args: await handle_ig_download(u, " ".join(c.args))
+    else: user_mode[u.effective_user.id]="ig_download"; await u.message.reply_text("📸 Instagram link paste karo:")
 
-async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_ttdownload(u, c):
+    if c.args: await handle_tt_download(u, " ".join(c.args))
+    else: user_mode[u.effective_user.id]="tt_download"; await u.message.reply_text("🎵 TikTok link paste karo:")
+
+async def cmd_removebg(u, c):
+    user_mode[u.effective_user.id]="remove_bg"
+    await u.message.reply_text("🖼️ Photo bhejo — background remove kar deta hoon:")
+
+# ─── Message Router ────────────────────────────────────────────────────────────
+async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    photo = update.message.photo[-1]
+    file = await context.bot.get_file(photo.file_id)
+    photo_bytes = await file.download_as_bytearray()
+    await handle_bg_remove(update, bytes(photo_bytes))
+
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
-    user_id = update.effective_user.id
-    mode = user_mode.get(user_id, "auto")
+    uid = update.effective_user.id
+    mode = user_mode.get(uid, "auto")
 
-    # Auto-detect
-    if is_youtube_url(text):
-        if mode == "yt_download":
-            await handle_youtube_download(update, text)
-        else:
-            await handle_youtube_details(update, text)
-    elif is_instagram_url(text):
-        await handle_instagram_download(update, text)
-    elif is_tiktok_url(text):
-        await handle_tiktok_download(update, text)
+    btn_map = {
+        "🎬 YouTube Details": ("yt_details", "🎬 YouTube link paste karo:"),
+        "⬇️ YT Downloader": ("yt_download", "⬇️ YouTube link paste karo (max 49MB):"),
+        "📸 Instagram Downloader": ("ig_download", "📸 Instagram post/reel link paste karo:"),
+        "🎵 TikTok Downloader": ("tt_download", "🎵 TikTok link paste karo:"),
+        "🖼️ Remove Background": ("remove_bg", "🖼️ Ab ek photo bhejo:"),
+    }
+    if text in btn_map:
+        user_mode[uid], prompt = btn_map[text]
+        await update.message.reply_text(prompt); return
+    if text == "ℹ️ Help":
+        await help_cmd(update, context); return
+
+    if YT_REGEX.search(text):
+        if mode == "yt_download": await handle_yt_download(update, text)
+        else: await handle_yt_details(update, text)
+    elif IG_REGEX.search(text):
+        await handle_ig_download(update, text)
+    elif TT_REGEX.search(text):
+        await handle_tt_download(update, text)
     else:
-        if mode == "yt_details":
-            await update.message.reply_text("❌ That doesn't look like a YouTube link. Try again.")
-        elif mode == "yt_download":
-            await update.message.reply_text("❌ That doesn't look like a YouTube link. Try again.")
-        elif mode == "ig_download":
-            await handle_instagram_download(update, text)
-        elif mode == "tt_download":
-            await handle_tiktok_download(update, text)
-        else:
-            await update.message.reply_text(
-                "❓ Please paste a valid YouTube / Instagram / TikTok link, or use the buttons below.",
-                reply_markup=get_main_keyboard()
-            )
+        await update.message.reply_text("❓ YouTube / Instagram / TikTok link paste karo, ya buttons use karo 👇", reply_markup=main_kb())
 
-async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    mode = user_mode.get(user_id, "auto")
-    if mode == "remove_bg" or update.message.photo:
-        await handle_remove_bg(update, context)
-
-# ─────────────────────────────────────────
-#  DIRECT COMMANDS
-# ─────────────────────────────────────────
-async def cmd_ytdetails(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.args:
-        await handle_youtube_details(update, " ".join(context.args))
-    else:
-        user_mode[update.effective_user.id] = "yt_details"
-        await update.message.reply_text("🎬 Send YouTube URL:")
-
-async def cmd_ytdownload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.args:
-        await handle_youtube_download(update, " ".join(context.args))
-    else:
-        user_mode[update.effective_user.id] = "yt_download"
-        await update.message.reply_text("⬇️ Send YouTube URL:")
-
-async def cmd_igdownload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.args:
-        await handle_instagram_download(update, " ".join(context.args))
-    else:
-        user_mode[update.effective_user.id] = "ig_download"
-        await update.message.reply_text("📸 Send Instagram URL:")
-
-async def cmd_ttdownload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.args:
-        await handle_tiktok_download(update, " ".join(context.args))
-    else:
-        user_mode[update.effective_user.id] = "tt_download"
-        await update.message.reply_text("🎵 Send TikTok URL:")
-
-async def cmd_removebg(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_mode[update.effective_user.id] = "remove_bg"
-    await update.message.reply_text("🖼️ Send a photo to remove background:")
-
-# ─────────────────────────────────────────
-#  MAIN
-# ─────────────────────────────────────────
+# ─── Main ──────────────────────────────────────────────────────────────────────
 def main():
+    if not BOT_TOKEN:
+        raise ValueError("BOT_TOKEN environment variable set nahi hai!")
     app = Application.builder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("ytdetails", cmd_ytdetails))
     app.add_handler(CommandHandler("ytdownload", cmd_ytdownload))
     app.add_handler(CommandHandler("igdownload", cmd_igdownload))
     app.add_handler(CommandHandler("ttdownload", cmd_ttdownload))
     app.add_handler(CommandHandler("removebg", cmd_removebg))
-
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_keyboard_buttons))
-
-    logger.info("Bot is running...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.add_handler(MessageHandler(filters.PHOTO, on_photo))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    logger.info("✅ Bot polling shuru…")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
