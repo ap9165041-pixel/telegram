@@ -47,8 +47,8 @@ from telegram.ext import (
 # ══════════════════════════════════════════════════════════════
 BOT_TOKEN            = "8345172518:AAHahPKnJZwKZ-SIp97vBtNyMyyRXZ-Gw7M"
 REMOVE_BG_API_KEY    = "ssgbLxpM5sZT3eAxsJFLzJZ4"      # https://www.remove.bg/dashboard#api-key
-REPLICATE_API_TOKEN  = "fghfghfgh"   # https://replicate.com/account/api-tokens
-ANTHROPIC_API_KEY    = "gfhhg"      # https://console.anthropic.com/settings/api-keys
+REPLICATE_API_TOKEN  = "hgdffd"   # https://replicate.com/account/api-tokens
+ANTHROPIC_API_KEY    = "fdhfdh"      # https://console.anthropic.com/settings/api-keys
 # ══════════════════════════════════════════════════════════════
 
 os.environ["REPLICATE_API_TOKEN"] = REPLICATE_API_TOKEN
