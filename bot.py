@@ -7,8 +7,8 @@ from telegram.constants import ParseMode
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN         = os.environ.get("8345172518:AAHahPKnJZwKZ-SIp97vBtNyMyyRXZ-Gw7M", "")
-REMOVE_BG_API_KEY = os.environ.get("ssgbLxpM5sZT3eAxsJFLzJZ4", "")
+BOT_TOKEN         = os.environ.get("BOT_TOKEN", "8345172518:AAHahPKnJZwKZ-SIp97vBtNyMyyRXZ-Gw7M")
+REMOVE_BG_API_KEY = os.environ.get("REMOVE_BG_API_KEY", "ssgbLxpM5sZT3eAxsJFLzJZ4")
 
 YT_REGEX = re.compile(r'(https?://)?(www\.)?(youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/)[\w\-]+')
 IG_REGEX = re.compile(r'(https?://)?(www\.)?instagram\.com/')
